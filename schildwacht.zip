@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="nl"><head><meta charset="utf-8"><title>SchildWacht instellingen</title>
+<style>
+ body{max-width:560px;margin:32px auto;font:14px/1.5 system-ui,sans-serif;color:#1f2937;padding:0 16px}
+ input[type=text]{width:100%;padding:8px;font-family:monospace;box-sizing:border-box}
+ button{padding:8px 14px;border-radius:6px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;cursor:pointer;margin:8px 8px 0 0}
+ button.sec{background:#fff;color:#1a73e8}
+ #msg{margin-top:12px;font-weight:600}
+ ol{padding-left:20px}
+</style></head><body>
+<h1>🛡️ SchildWacht</h1>
+<h3>Google Safe Browsing API-sleutel</h3>
+<p>Met een gratis sleutel controleert SchildWacht elke site en download tegen Google's lijst met bekende malware- en phishing-sites. Zonder sleutel werkt alleen de lokale heuristiek.</p>
+<ol>
+ <li>Ga naar <b>console.cloud.google.com</b> en maak een project.</li>
+ <li>Zet de <b>Safe Browsing API</b> aan.</li>
+ <li>Maak onder "Credentials" een <b>API key</b> en plak die hieronder.</li>
+</ol>
+<input type="text" id="key" placeholder="AIza..." autocomplete="off">
+<button id="save">Opslaan</button><button class="sec" id="test">Sleutel testen</button>
+<div id="msg"></div>
+<p style="color:#6b7280;font-size:12px">Let op: de URL's die je bezoekt worden voor controle naar Google gestuurd zodra je een sleutel instelt.</p>
+<script src="options.js"></script></body></html>
+
+const $ = id => document.getElementById(id);
+chrome.storage.local.get({ apiKey: '' }).then(s => { $('key').value = s.apiKey; });
+$('save').onclick = async () => {
+  await chrome.storage.local.set({ apiKey: $('key').value.trim() });
+  $('msg').textContent = 'Opgeslagen ✔'; $('msg').style.color = '#166534';
+};
+$('test').onclick = async () => {
+  const key = $('key').value.trim();
+  if (!key) { $('msg').textContent = 'Vul eerst een sleutel in.'; $('msg').style.color = '#92400e'; return; }
+  $('msg').textContent = 'Testen…';
+  const r = await chrome.runtime.sendMessage({ type: 'testKey', key });
+  if (r.ok && r.threat) { $('msg').textContent = '✔ Sleutel werkt: Google testbedreiging herkend (' + r.threat + ').'; $('msg').style.color = '#166534'; }
+  else if (r.ok) { $('msg').textContent = 'Sleutel geaccepteerd, maar testbedreiging niet herkend.'; $('msg').style.color = '#92400e'; }
+  else { $('msg').textContent = '✖ Mislukt (status ' + r.status + '). Controleer of de Safe Browsing API aanstaat voor deze sleutel.'; $('msg').style.color = '#991b1b'; }
+};
+
+<!doctype html>
+<html lang="nl"><head><meta charset="utf-8">
+<style>
+ body{width:340px;margin:0;font:13px/1.4 system-ui,sans-serif;color:#1f2937}
+ header{padding:12px 14px;background:#1a73e8;color:#fff;display:flex;justify-content:space-between;align-items:center}
+ header b{font-size:15px}
+ section{padding:12px 14px;border-bottom:1px solid #e5e7eb}
+ h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;color:#6b7280;letter-spacing:.04em}
+ .status{padding:10px;border-radius:8px;font-weight:600}
+ .ok{background:#dcfce7;color:#166534}.warn{background:#fef3c7;color:#92400e}.bad{background:#fee2e2;color:#991b1b}.info{background:#f3f4f6;color:#374151}
+ ul{margin:6px 0 0;padding-left:18px;font-weight:400}
+ .ext{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid #f3f4f6}
+ .ext small{display:block;color:#6b7280}
+ button{border:1px solid #d1d5db;background:#fff;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px}
+ label{display:flex;gap:8px;align-items:center;margin:4px 0}
+ a{color:#1a73e8;cursor:pointer}
+ #ext-list{max-height:180px;overflow:auto}
+</style></head><body>
+<header><b style="display:flex;align-items:center;gap:8px"><img src="icons/icon48.png" width="24" height="24" alt="">SchildWacht</b><label style="margin:0"><input type="checkbox" id="enabled"> aan</label></header>
+<section><h3>Deze pagina</h3><div id="status" class="status info">Controleren…</div></section>
+<section><h3>Statistieken</h3><div>Geblokkeerd: <b id="blocked">0</b></div>
+ <label><input type="checkbox" id="dl"> Gevaarlijke downloads blokkeren</label></section>
+<section><h3>Extensie-audit</h3><div id="ext-list">Laden…</div></section>
+<section><a id="opt">Instellingen / API-sleutel</a></section>
+<script src="popup.js"></script></body></html>
+
+const $ = id => document.getElementById(id);
+const RISKY_PERMS = ['webRequest', 'webRequestBlocking', 'cookies', 'history', 'debugger', 'nativeMessaging', 'proxy', 'management', 'downloads', 'clipboardRead'];
+
+async function init() {
+  const s = await chrome.storage.local.get({ enabled: true, blockDownloads: true, blocked: 0 });
+  $('enabled').checked = s.enabled;
+  $('dl').checked = s.blockDownloads;
+  $('blocked').textContent = s.blocked;
+  $('enabled').onchange = e => chrome.storage.local.set({ enabled: e.target.checked });
+  $('dl').onchange = e => chrome.storage.local.set({ blockDownloads: e.target.checked });
+  $('opt').onclick = () => chrome.runtime.openOptionsPage();
+  pageStatus();
+  audit();
+}
+
+async function pageStatus() {
+  const el = $('status');
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !/^https?:/.test(tab.url || '')) { el.textContent = 'Interne pagina - niets te controleren.'; return; }
+  const r = await chrome.runtime.sendMessage({ type: 'analyze', url: tab.url });
+  const list = document.createElement('ul');
+  (r.threat ? ['Google Safe Browsing: ' + r.threat] : []).concat(r.reasons).forEach(t => {
+    const li = document.createElement('li'); li.textContent = t; list.append(li);
+  });
+  if (r.threat || r.score >= 6) { el.className = 'status bad'; el.textContent = 'Gevaarlijk'; el.append(list); }
+  else if (r.score >= 3) { el.className = 'status warn'; el.textContent = 'Wees voorzichtig'; el.append(list); }
+  else {
+    el.className = 'status ok'; el.textContent = 'Geen problemen gevonden';
+    if (!r.hasKey) {
+      const n = document.createElement('div');
+      n.style.cssText = 'font-weight:400;font-size:12px;margin-top:4px';
+      n.textContent = 'Tip: voeg een Safe Browsing API-sleutel toe voor sterkere bescherming.';
+      el.append(n);
+    }
+  }
+}
+
+async function audit() {
+  const box = $('ext-list');
+  const all = await chrome.management.getAll();
+  const rows = [];
+  for (const e of all) {
+    if (e.id === chrome.runtime.id || e.type !== 'extension' || !e.enabled) continue;
+    let score = 0; const why = [];
+    const hosts = [...(e.hostPermissions || []), ...(e.permissions || [])];
+    if (hosts.some(h => ['<all_urls>', '*://*/*', 'http://*/*', 'https://*/*'].includes(h))) { score += 2; why.push('leest alle websites'); }
+    const rp = (e.permissions || []).filter(p => RISKY_PERMS.includes(p));
+    if (rp.length) { score += rp.length; why.push(rp.join(', ')); }
+    if (e.installType === 'sideload' || e.installType === 'development') { score += 2; why.push('niet uit de Web Store'); }
+    rows.push({ e, score, why });
+  }
+  rows.sort((a, b) => b.score - a.score);
+  box.textContent = '';
+  if (!rows.length) { box.textContent = 'Geen andere extensies.'; return; }
+  for (const { e, score, why } of rows.slice(0, 15)) {
+    const row = document.createElement('div'); row.className = 'ext';
+    const left = document.createElement('div');
+    const name = document.createElement('div'); name.textContent = (score >= 4 ? '🔴 ' : score >= 2 ? '🟠 ' : '🟢 ') + e.name;
+    const small = document.createElement('small'); small.textContent = why.join(' · ') || 'geen risicovolle rechten';
+    left.append(name, small);
+    const btn = document.createElement('button'); btn.textContent = 'Uitschakelen';
+    btn.onclick = async () => { await chrome.management.setEnabled(e.id, false); row.remove(); };
+    row.append(left, btn); box.append(row);
+  }
+}
+init();
+
+const p = new URLSearchParams(location.search);
+const target = p.get('u') || '';
+document.getElementById('url').textContent = target;
+const ul = document.getElementById('reasons');
+(p.get('r') || '').split('|').filter(Boolean).forEach(r => {
+  const li = document.createElement('li'); li.textContent = r; ul.append(li);
+});
+document.getElementById('back').onclick = () => {
+  if (history.length > 1) history.back(); else window.close();
+};
+document.getElementById('go').onclick = async () => {
+  try {
+    const u = new URL(target);
+    if (!/^https?:$/.test(u.protocol)) return;
+    await chrome.runtime.sendMessage({ type: 'allow', host: u.hostname });
+    location.href = target;
+  } catch {}
+};
+
+<!doctype html>
+<html lang="nl"><head><meta charset="utf-8"><title>Gevaarlijke site geblokkeerd</title>
+<style>
+ body{margin:0;min-height:100vh;display:grid;place-items:center;background:#7f1d1d;color:#fff;font-family:system-ui,sans-serif}
+ main{max-width:620px;padding:32px}
+ h1{margin:0 0 8px;font-size:28px}
+ .url{background:rgba(0,0,0,.3);padding:10px 12px;border-radius:8px;word-break:break-all;font-family:monospace;font-size:13px}
+ ul{padding-left:20px;line-height:1.6}
+ button{border:0;border-radius:8px;padding:12px 20px;font-size:15px;font-weight:600;cursor:pointer;margin:8px 8px 0 0}
+ #back{background:#fff;color:#7f1d1d}
+ #go{background:transparent;color:#fecaca;border:1px solid #fecaca}
+</style></head><body><main>
+ <h1>⚠️ Deze website is geblokkeerd</h1>
+ <p>SchildWacht denkt dat deze site gevaarlijk is.</p>
+ <div class="url" id="url"></div>
+ <p><b>Waarom?</b></p>
+ <ul id="reasons"></ul>
+ <button id="back">Terug naar veiligheid</button>
+ <button id="go">Toch doorgaan (niet aanbevolen)</button>
+</main><script src="warning.js"></script></body></html>
+
+// SchildWacht - service worker
+const DEFAULTS = { enabled: true, blockDownloads: true, apiKey: '', blocked: 0 };
+const CACHE_TTL = 10 * 60 * 1000;
+const sbCache = new Map();
+
+const BRANDS = {
+  paypal: ['paypal.com', 'paypal.me'],
+  rabobank: ['rabobank.nl', 'rabobank.com'],
+  abnamro: ['abnamro.nl', 'abnamro.com'],
+  digid: ['digid.nl'],
+  tikkie: ['tikkie.me', 'abnamro.nl'],
+  postnl: ['postnl.nl'],
+  dhl: ['dhl.com', 'dhl.nl', 'dhl.de'],
+  belastingdienst: ['belastingdienst.nl'],
+  binance: ['binance.com'],
+  coinbase: ['coinbase.com'],
+  netflix: ['netflix.com'],
+  icloud: ['icloud.com', 'apple.com'],
+  bunq: ['bunq.com'],
+  microsoft: ['microsoft.com', 'microsoftonline.com', 'microsoft.nl', 'sharepoint.com', 'office.com', 'live.com', 'azure.com', 'windows.net']
+};
+const SUSPICIOUS_TLDS = new Set(['zip', 'mov', 'tk', 'ml', 'ga', 'cf', 'gq', 'top', 'xyz', 'click', 'icu', 'cyou', 'monster', 'rest', 'loan', 'support', 'country', 'kim']);
+const RISKY_EXT = new Set(['exe', 'msi', 'scr', 'bat', 'cmd', 'com', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'ps1', 'jar', 'hta', 'lnk', 'pif', 'reg', 'apk']);
+const DOUBLE_EXT = /\.(pdf|docx?|xlsx?|pptx?|jpe?g|png|gif|txt|mp3|mp4)\.(exe|scr|bat|cmd|com|vbs|js|jar|hta|lnk|pif|msi|ps1)$/i;
+
+const getSettings = () => chrome.storage.local.get(DEFAULTS);
+
+function isPrivateHost(h) {
+  return h === 'localhost' || h.endsWith('.local') ||
+    /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
+}
+
+// ---------- Heuristiek ----------
+function analyzeUrl(raw) {
+  const out = { score: 0, reasons: [] };
+  let u;
+  try { u = new URL(raw); } catch { return out; }
+  if (!/^https?:$/.test(u.protocol)) return out;
+  const host = u.hostname.toLowerCase();
+  if (isPrivateHost(host)) return out;
+  const add = (n, t) => { out.score += n; out.reasons.push(t); };
+
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.startsWith('['))
+    add(4, 'Het adres is een IP-nummer in plaats van een domeinnaam.');
+  if (host.includes('xn--'))
+    add(3, 'Domeinnaam gebruikt vreemde tekens (punycode), vaak voor namaak-sites.');
+  if (u.username || u.password)
+    add(4, 'De link bevat een gebruikersnaam/wachtwoord-deel om je te misleiden.');
+  const labels = host.split('.');
+  if (labels.length >= 5) add(2, 'Ongewoon veel subdomeinen.');
+  if (host.length > 45) add(1, 'Extreem lange domeinnaam.');
+  if ((host.match(/-/g) || []).length >= 3) add(2, 'Veel streepjes in de domeinnaam.');
+  if (u.protocol === 'http:') add(1, 'Verbinding is niet versleuteld (http).');
+  if (SUSPICIOUS_TLDS.has(labels[labels.length - 1])) add(2, 'Domeinextensie die vaak voor misbruik wordt gebruikt.');
+  if (u.port && !['80', '443'].includes(u.port)) add(1, 'Ongebruikelijke poort.');
+
+  const tokens = host.split(/[.\-]/);
+  for (const [brand, domains] of Object.entries(BRANDS)) {
+    const hit = tokens.includes(brand) || (brand.length >= 6 && host.includes(brand));
+    if (hit && !domains.some(d => host === d || host.endsWith('.' + d))) {
+      add(4, `Lijkt op "${brand}", maar is niet de officiële website.`);
+      break;
+    }
+  }
+  const kw = (u.pathname + u.search).toLowerCase().match(/login|signin|verify|secure|update|account|wallet|password|bankieren/g);
+  if (kw) add(Math.min(2, new Set(kw).size), 'Verdachte woorden in de link (login, verify, ...).');
+  return out;
+}
+
+// ---------- Google Safe Browsing ----------
+async function sbRequest(url, key) {
+  const res = await fetch('https://safebrowsing.googleapis.com/v4/threatMatches:find?key=' + encodeURIComponent(key), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client: { clientId: 'schildwacht', clientVersion: '1.0.0' },
+      threatInfo: {
+        threatTypes: ['MALWARE', 'SOCIAL_ENGINEERING', 'UNWANTED_SOFTWARE', 'POTENTIALLY_HARMFUL_APPLICATION'],
+        platformTypes: ['ANY_PLATFORM'],
+        threatEntryTypes: ['URL'],
+        threatEntries: [{ url }]
+      }
+    })
+  });
+  if (!res.ok) return { ok: false, status: res.status };
+  const data = await res.json();
+  return { ok: true, threat: data.matches && data.matches[0] ? data.matches[0].threatType : null };
+}
+
+async function safeBrowsing(url, key) {
+  if (!key) return null;
+  const hit = sbCache.get(url);
+  if (hit && Date.now() - hit.t < CACHE_TTL) return hit.threat;
+  try {
+    const r = await sbRequest(url, key);
+    if (!r.ok) return null;
+    sbCache.set(url, { t: Date.now(), threat: r.threat });
+    return r.threat;
+  } catch { return null; }
+}
+
+const THREAT_NL = {
+  MALWARE: 'malware',
+  SOCIAL_ENGINEERING: 'phishing / oplichting',
+  UNWANTED_SOFTWARE: 'ongewenste software',
+  POTENTIALLY_HARMFUL_APPLICATION: 'mogelijk schadelijke app'
+};
+
+// ---------- Navigatie ----------
+async function isAllowed(host) {
+  const { allowed = [] } = await chrome.storage.session.get('allowed');
+  return allowed.includes(host);
+}
+
+async function bumpBlocked() {
+  const { blocked } = await getSettings();
+  await chrome.storage.local.set({ blocked: (blocked || 0) + 1 });
+}
+
+chrome.webNavigation.onBeforeNavigate.addListener(async (d) => {
+  if (d.frameId !== 0 || !/^https?:/.test(d.url)) return;
+  const s = await getSettings();
+  if (!s.enabled) return;
+  let host;
+  try { host = new URL(d.url).hostname; } catch { return; }
+  if (await isAllowed(host)) return;
+
+  const heur = analyzeUrl(d.url);
+  const threat = await safeBrowsing(d.url, s.apiKey);
+  if (threat || heur.score >= 6) {
+    const reasons = [];
+    if (threat) reasons.push('Google Safe Browsing heeft deze site gemeld als: ' + (THREAT_NL[threat] || threat) + '.');
+    reasons.push(...heur.reasons);
+    const page = chrome.runtime.getURL('warning.html') + '?' + new URLSearchParams({ u: d.url, r: reasons.join('|') });
+    await bumpBlocked();
+    try { await chrome.tabs.update(d.tabId, { url: page }); } catch {}
+  }
+});
+
+chrome.webNavigation.onCompleted.addListener((d) => {
+  if (d.frameId !== 0) return;
+  const heur = analyzeUrl(d.url);
+  if (heur.score >= 3) {
+    chrome.action.setBadgeText({ tabId: d.tabId, text: '!' });
+    chrome.action.setBadgeBackgroundColor({ tabId: d.tabId, color: '#f59e0b' });
+  }
+});
+
+// ---------- Downloads ----------
+const decided = new Set();
+const warned = new Set();
+
+function fileNameOf(item) {
+  let n = (item.filename || '').split(/[\\/]/).pop();
+  if (!n) {
+    try { n = decodeURIComponent(new URL(item.finalUrl || item.url).pathname.split('/').pop()); } catch { n = ''; }
+  }
+  return n;
+}
+
+function notify(title, message) {
+  chrome.notifications.create({ type: 'basic', iconUrl: 'icons/icon128.png', title, message });
+}
+
+async function inspectDownload(item) {
+  if (decided.has(item.id)) return;
+  const s = await getSettings();
+  if (!s.enabled || !s.blockDownloads) return;
+  const url = item.finalUrl || item.url;
+  if (!/^https?:/.test(url)) return;
+
+  const name = fileNameOf(item);
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const risky = RISKY_EXT.has(ext);
+  const heur = analyzeUrl(url);
+  const threat = await safeBrowsing(url, s.apiKey);
+
+  let reason = null;
+  if (threat) reason = 'Google Safe Browsing: ' + (THREAT_NL[threat] || threat);
+  else if (DOUBLE_EXT.test(name)) reason = 'Dubbele extensie (' + name + ') - een bekende truc om malware te verbergen';
+  else if (risky && heur.score >= 3) reason = 'Uitvoerbaar bestand van een verdachte bron';
+
+  if (reason) {
+    decided.add(item.id);
+    try { await chrome.downloads.cancel(item.id); } catch {}
+    try { await chrome.downloads.removeFile(item.id); } catch {}
+    try { await chrome.downloads.erase({ id: item.id }); } catch {}
+    await bumpBlocked();
+    notify('Download geblokkeerd', (name || url) + '\n' + reason);
+  } else if (risky && !warned.has(item.id)) {
+    warned.add(item.id);
+    notify('Let op: uitvoerbaar bestand', 'Je downloadt "' + name + '". Open het alleen als je de bron vertrouwt.');
+  }
+}
+
+chrome.downloads.onCreated.addListener(inspectDownload);
+chrome.downloads.onChanged.addListener(async (delta) => {
+  if (delta.filename && delta.filename.current) {
+    const [item] = await chrome.downloads.search({ id: delta.id });
+    if (item) inspectDownload(item);
+  }
+});
+
+// ---------- Berichten van popup / waarschuwing / content script ----------
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  (async () => {
+    if (msg.type === 'analyze') {
+      const s = await getSettings();
+      const heur = analyzeUrl(msg.url);
+      const threat = await safeBrowsing(msg.url, s.apiKey);
+      sendResponse({ ...heur, threat: threat ? (THREAT_NL[threat] || threat) : null, hasKey: !!s.apiKey });
+    } else if (msg.type === 'allow') {
+      const { allowed = [] } = await chrome.storage.session.get('allowed');
+      allowed.push(msg.host);
+      await chrome.storage.session.set({ allowed });
+      sendResponse({ ok: true });
+    } else if (msg.type === 'testKey') {
+      try {
+        const r = await sbRequest('http://malware.testing.google.test/testing/malware/', msg.key);
+        sendResponse(r);
+      } catch (e) { sendResponse({ ok: false, status: 0 }); }
+    } else if (msg.type === 'pageWarning' && sender.tab) {
+      chrome.action.setBadgeText({ tabId: sender.tab.id, text: '!' });
+      chrome.action.setBadgeBackgroundColor({ tabId: sender.tab.id, color: '#dc2626' });
+      sendResponse({ ok: true });
+    }
+  })();
+  return true;
+});
+
+// SchildWacht - controleert inlogformulieren op de pagina
+(function () {
+  if (window.top !== window) return;
+  const BRANDS = {
+    paypal: ['paypal.com'], rabobank: ['rabobank.nl', 'rabobank.com'], abnamro: ['abnamro.nl', 'abnamro.com'],
+    digid: ['digid.nl'], postnl: ['postnl.nl'], belastingdienst: ['belastingdienst.nl'],
+    netflix: ['netflix.com'], coinbase: ['coinbase.com'], binance: ['binance.com'], bunq: ['bunq.com']
+  };
+  const host = location.hostname.toLowerCase();
+  let shown = false;
+
+  function check() {
+    if (shown) return;
+    const pw = document.querySelector('input[type="password"]');
+    if (!pw) return;
+    const reasons = [];
+    if (location.protocol === 'http:') reasons.push('Deze pagina vraagt om een wachtwoord via een onbeveiligde (http) verbinding.');
+    const form = pw.closest('form');
+    if (form && form.action) {
+      try {
+        const ah = new URL(form.action, location.href).hostname.toLowerCase();
+        if (ah && ah !== host && !ah.endsWith('.' + host) && !host.endsWith('.' + ah))
+          reasons.push('Je wachtwoord wordt verstuurd naar een ander domein (' + ah + ').');
+      } catch {}
+    }
+    const text = (document.title + ' ' + ((document.querySelector('h1') || {}).textContent || '')).toLowerCase();
+    for (const [brand, domains] of Object.entries(BRANDS)) {
+      if (text.includes(brand) && !domains.some(d => host === d || host.endsWith('.' + d))) {
+        reasons.push('De pagina doet zich voor als "' + brand + '", maar staat op ' + host + '.');
+        break;
+      }
+    }
+    if (reasons.length) banner(reasons);
+  }
+
+  function banner(reasons) {
+    shown = true;
+    chrome.runtime.sendMessage({ type: 'pageWarning' }).catch(() => {});
+    const el = document.createElement('div');
+    el.style.cssText = 'all:initial;position:fixed;top:0;left:0;right:0;z-index:2147483647;';
+    const root = el.attachShadow({ mode: 'closed' });
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'font:14px/1.4 system-ui,sans-serif;background:#b91c1c;color:#fff;padding:10px 16px;display:flex;gap:12px;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.4)';
+    const txt = document.createElement('div');
+    txt.style.flex = '1';
+    const b = document.createElement('b');
+    b.textContent = 'SchildWacht waarschuwing: ';
+    txt.append(b, reasons.join(' '));
+    const btn = document.createElement('button');
+    btn.textContent = 'Sluiten';
+    btn.style.cssText = 'background:#fff;color:#b91c1c;border:0;border-radius:6px;padding:6px 12px;cursor:pointer;font-weight:600';
+    btn.onclick = () => el.remove();
+    wrap.append(txt, btn);
+    root.append(wrap);
+    document.documentElement.append(el);
+  }
+
+  check();
+  let t;
+  new MutationObserver(() => { clearTimeout(t); t = setTimeout(check, 800); })
+    .observe(document.documentElement, { childList: true, subtree: true });
+  setTimeout(() => { try { /* stop na 15s niet nodig; observer is licht */ } catch {} }, 15000);
+})();
+
+{
+  "manifest_version": 3,
+  "name": "SchildWacht",
+  "version": "1.0.0",
+  "description": "Beschermt tegen phishing, malafide sites en gevaarlijke downloads, en controleert je geïnstalleerde extensies.",
+  "permissions": ["storage", "webNavigation", "downloads", "management", "notifications", "tabs"],
+  "host_permissions": ["https://safebrowsing.googleapis.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "SchildWacht" },
+  "options_page": "options.html",
+  "content_scripts": [
+    { "matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "run_at": "document_idle" }
+  ],
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+}
